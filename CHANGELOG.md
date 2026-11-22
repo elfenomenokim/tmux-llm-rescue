@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 — 2026-11-22
+
+- Record tmux window indexes and the owning process command line in new snapshots.
+  Previously recorded snapshots remain readable.
+
 ## 0.1.1 — 2026-11-22
 
 - Install from PyPI: `pipx install tmux-llm-rescue`.

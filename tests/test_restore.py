@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,24 @@ def row(sid, cwd):
 
 
 class RestoreTest(unittest.TestCase):
+    def test_record_writes_window_index_and_owner_argv_and_keeps_old_snapshot(self):
+        sid = "7442a0d9-33e7-4722-8f9e-bb2f6c1d30f5"
+        argv = f"codex resume {sid}"
+        old = {"ts": 20, "server": {"start": 10, "pid": 100}, "panes": [pane(1, "/work")]}
+        fields = ("200", "30", "work", "$1", "@8", "4", "review | notes",
+                  "%9", "0", "123", "/work", "zsh", "0")
+        tmux = SimpleNamespace(returncode=0, stdout=r"\037".join(fields), stderr="")
+        ps = SimpleNamespace(stdout=f"123 1 -zsh\n124 123 {argv}\n")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "snapshot.jsonl"
+            path.write_text(json.dumps(old) + "\n")
+            socket = SimpleNamespace(run=lambda *args: tmux, history=path)
+            with patch.object(topology.subprocess, "run", return_value=ps):
+                recorded = topology.record(socket)
+            self.assertEqual(topology.read_history(path), [old, recorded])
+        current, = recorded["panes"]
+        self.assertEqual((current["win_index"], current["argv"], current["sid"]), ("4", argv, sid))
+
     def test_recorded_identity_precedes_cwd_matching_and_only_skips_running(self):
         with tempfile.TemporaryDirectory() as directory:
             candidates = [row("first", directory), row("second", directory)]

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tmux-llm-rescue"
-version = "0.1.1"
+version = "0.1.2"
 description = "A command-line tool for recovering Claude Code, Codex and Kimi sessions after a tmux crash."
 readme = "README.md"
 requires-python = ">=3.9"

@@ -20,7 +20,8 @@ _BINARIES = {"claude": "claude", "claude-code": "claude", "codex": "codex",
              "kimi": "kimi", "kimi-code": "kimi"}
 _FIELDS = {
     "server_pid": "pid", "server_start": "start_time",
-    "session": "session_name", "session_id": "session_id", "window_id": "window_id", "window": "window_name",
+    "session": "session_name", "session_id": "session_id", "window_id": "window_id",
+    "win_index": "window_index", "window": "window_name",
     "pane_id": "pane_id", "pane_index": "pane_index", "pane_pid": "pane_pid",
     "cwd": "pane_current_path", "command": "pane_current_command", "dead": "pane_dead",
 }
@@ -33,10 +34,11 @@ class Socket:
     option: str
     address: str
     key: str
+    binary: str = "tmux"
 
     @property
     def args(self) -> tuple[str, ...]:
-        return "tmux", self.option, self.address
+        return self.binary, self.option, self.address
 
     def run(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run([*self.args, *args], capture_output=True, text=True,
@@ -101,28 +103,37 @@ def process_identities() -> tuple[dict, dict]:
         fields = line.split(None, 2)
         if len(fields) == 3 and fields[0].isdigit() and fields[1].isdigit():
             pid, parent, args = fields
-            identities[int(pid)] = _cli(args)
+            identities[int(pid)] = (*_cli(args), args)
             children[int(parent)].append(int(pid))
     return identities, children
 
 
 def _pane_identity(pid: int, identities: dict, children: dict) -> tuple:
     nearby = deque([pid])
-    fallback = None, None
+    fallback = None, None, None
     while nearby:
         current = nearby.popleft()
-        family, sid = identities.get(current, (None, None))
+        family, sid, argv = identities.get(current, (None, None, None))
         if family:
             if sid:
-                return family, sid
-            if fallback == (None, None):
-                fallback = family, None
+                return family, sid, argv
+            if fallback[0] is None:
+                fallback = family, None, argv
         nearby.extend(children.get(current, ()))
     return fallback
 
 
-def capture(socket: Socket, identities: dict, children: dict) -> dict | None:
-    fmt = _SEPARATOR.join("#{" + name + "}" for name in _FIELDS.values())
+def capture(socket: Socket, identities=None, children=None, *, pane_owner=None,
+            extra_fields=None, include_dead=False) -> dict | None:
+    """Read one socket, with optional caller-provided pane metadata and ownership."""
+    if pane_owner is None:
+        if identities is None:
+            identities, children = process_identities()
+        def pane_owner(pid):
+            return _pane_identity(pid, identities, children)
+
+    fields = {**_FIELDS, **(extra_fields or {})}
+    fmt = _SEPARATOR.join("#{" + name + "}" for name in fields.values())
     result = socket.run("list-panes", "-a", "-F", fmt)
     if result.returncode:
         if any(marker in result.stderr for marker in ("No such file", "no server running", "Connection refused")):
@@ -133,9 +144,9 @@ def capture(socket: Socket, identities: dict, children: dict) -> dict | None:
     server = None
     for line in result.stdout.splitlines():
         values = line.split(_SEPARATOR)
-        if len(values) != len(_FIELDS):
+        if len(values) != len(fields):
             raise ValueError("tmux returned an unsupported separator in a pane field")
-        pane = dict(zip(_FIELDS, values))
+        pane = dict(zip(fields, values))
         server_pid = pane.pop("server_pid")
         server_start = pane.pop("server_start")
         if not server_pid.isdigit() or not server_start.isdigit():
@@ -146,12 +157,13 @@ def capture(socket: Socket, identities: dict, children: dict) -> dict | None:
         server = identity
         pid = pane.pop("pane_pid")
         dead = pane.pop("dead") == "1"
-        if dead or not pid.isdigit() or pane["pane_id"] in seen:
+        if (dead and not include_dead) or not pid.isdigit() or pane["pane_id"] in seen:
             continue
         seen.add(pane["pane_id"])
-        family, sid = _pane_identity(int(pid), identities, children)
+        family, sid, argv = pane_owner(int(pid))
         pane["family"] = family or _BINARIES.get(pane["command"])
         pane["sid"] = sid
+        pane["argv"] = argv
         panes.append(pane)
     if server is None:
         raise RuntimeError("tmux returned no pane records")
@@ -199,7 +211,7 @@ def select_snapshot(history: list[dict], current: dict | None,
     return latest_snapshot(history, time.time())
 
 
-def record(socket: Socket) -> dict:
+def record(socket: Socket, *, capture_snapshot=capture) -> dict:
     from fcntl import flock, LOCK_EX
 
     path = socket.history
@@ -207,7 +219,7 @@ def record(socket: Socket) -> dict:
     lock_path = path.with_suffix(".record.lock")
     with lock_path.open("a", encoding="utf-8") as lock:
         flock(lock, LOCK_EX)
-        snapshot = capture(socket, *process_identities())
+        snapshot = capture_snapshot(socket)
         if snapshot is None:
             raise RuntimeError("no tmux server to record")
         history = read_history(path)
